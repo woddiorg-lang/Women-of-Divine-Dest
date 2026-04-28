@@ -1,0 +1,113 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() { return request.auth != null; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    
+    // User validation
+    function isValidUser(data) {
+      return data.keys().hasAll(['email', 'name', 'role', 'country', 'streak', 'points', 'createdAt']) &&
+        data.email is string && data.email.size() <= 200 &&
+        data.name is string && data.name.size() <= 100 &&
+        data.role is string && data.role in ['student', 'tutor', 'admin'] &&
+        data.country is string && data.country.size() <= 100 &&
+        data.streak is number &&
+        data.points is number &&
+        data.createdAt is number &&
+        (!('pathway' in data) || (data.pathway is string && data.pathway in ['GMN', 'NNN', 'None'])) &&
+        (!('completedRootingModules' in data) || (data.completedRootingModules is list && data.completedRootingModules.size() <= 20)) &&
+        (!('completedBlueprintLessons' in data) || (data.completedBlueprintLessons is list && data.completedBlueprintLessons.size() <= 50)) &&
+        (!('completedSkills' in data) || (data.completedSkills is list && data.completedSkills.size() <= 100));
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         request.auth.token.email == 'woddi.org@gmail.com'
+      );
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn(); // Should ideally restrict, but profiles likely public for leaderboard
+      allow list: if isSignedIn(); // For leaderboard
+      allow create: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidUser(incoming());
+      allow update: if isSignedIn() && isValidId(userId) && isValidUser(incoming()) &&
+        ((request.auth.uid == userId && incoming().diff(existing()).affectedKeys().hasOnly(['streak', 'points', 'completedRootingModules', 'completedBlueprintLessons', 'completedSkills', 'pathway', 'country', 'name'])) ||
+         (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['role'])));
+      allow delete: if isAdmin() || request.auth.uid == userId;
+    }
+
+    // Post validation
+    function isValidPost(data) {
+       return data.keys().hasAll(['authorId', 'authorName', 'authorAvatarLetter', 'content', 'likes', 'comments', 'createdAt']) &&
+        data.authorId is string && data.authorId == request.auth.uid &&
+        data.authorName is string && data.authorName.size() <= 100 &&
+        data.authorAvatarLetter is string && data.authorAvatarLetter.size() <= 2 &&
+        (!('authorPathway' in data) || (data.authorPathway is string && data.authorPathway.size() <= 10)) &&
+        data.content is string && data.content.size() <= 2000 &&
+        data.likes is number && data.likes >= 0 &&
+        data.comments is number && data.comments >= 0 &&
+        data.createdAt is number;
+    }
+
+    match /posts/{postId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(postId) && isValidPost(incoming());
+      allow update: if isSignedIn() && isValidId(postId) &&
+        ((incoming().diff(existing()).affectedKeys().hasOnly(['likes', 'comments']) && incoming().likes is number && incoming().comments is number) ||
+         (request.auth.uid == existing().authorId && incoming().diff(existing()).affectedKeys().hasOnly(['content']) && incoming().content is string && incoming().content.size() <= 2000) ||
+         (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['content']) && incoming().content is string && incoming().content.size() <= 2000));
+      allow delete: if isAdmin() || (isSignedIn() && request.auth.uid == existing().authorId);
+    }
+
+    // Ticket validation
+    function isValidTicket(data) {
+      return data.keys().hasAll(['userId', 'subject', 'message', 'status', 'createdAt']) &&
+        data.userId is string && data.userId == request.auth.uid &&
+        data.subject is string && data.subject.size() <= 200 &&
+        data.message is string && data.message.size() <= 5000 &&
+        data.status is string && data.status in ['In Progress', 'Resolved'] &&
+        data.createdAt is number;
+    }
+
+    match /tickets/{ticketId} {
+      allow get: if isAdmin() || (isSignedIn() && existing().userId == request.auth.uid);
+      allow list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(ticketId) && isValidTicket(incoming());
+      allow update: if isSignedIn() && isValidId(ticketId) && (
+         (existing().userId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status'])) ||
+         (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['status']))
+      ) && incoming().status in ['In Progress', 'Resolved'];
+      allow delete: if isAdmin();
+    }
+
+    // Listing validation
+    function isValidListing(data) {
+      return data.keys().hasAll(['userId', 'title', 'category', 'sellerName', 'price', 'desc', 'createdAt']) &&
+        data.userId is string && data.userId == request.auth.uid &&
+        data.title is string && data.title.size() <= 200 &&
+        data.category is string && data.category.size() <= 50 &&
+        data.sellerName is string && data.sellerName.size() <= 100 &&
+        data.price is string && data.price.size() <= 100 &&
+        data.desc is string && data.desc.size() <= 2000 &&
+        data.createdAt is number;
+    }
+
+    match /listings/{listingId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(listingId) && isValidListing(incoming());
+      allow update: if isSignedIn() && isValidId(listingId) && isValidListing(incoming()) && (
+         (existing().userId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'category', 'sellerName', 'price', 'desc'])) ||
+         (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'category', 'sellerName', 'price', 'desc']))
+      );
+      allow delete: if isAdmin() || (isSignedIn() && existing().userId == request.auth.uid);
+    }
+  }
+}
